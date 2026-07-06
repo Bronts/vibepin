@@ -95,6 +95,16 @@
   const shadow = root.attachShadow({ mode: 'open' });
   document.documentElement.appendChild(root);
 
+  // Keystrokes typed into the overlay's own inputs must not reach the host app
+  // (e.g. Space hitting a play/pause shortcut while you're writing a note).
+  // Stop them at the shadow boundary — after the overlay's internal handlers
+  // have run, before they bubble out to the app's document/window listeners.
+  // Scoped to the shadow root, so only overlay-originated keys are affected;
+  // keys typed into the app itself never enter here.
+  ['keydown', 'keyup', 'keypress'].forEach((type) =>
+    shadow.addEventListener(type, (e) => { e.stopPropagation(); })
+  );
+
   shadow.innerHTML = `
   <style>
     :host { all: initial;
