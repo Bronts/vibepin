@@ -11,10 +11,14 @@ a web dev server **or** an Electron renderer — with React component + `file:li
 - **Pin** an element or **drag a box** over a region, type a note, hit **Send**.
 - Your agent drains the queue and edits the right file (React → component name + source line).
 - Two pickup modes: a **zero-dep file watcher**, or an **MCP** `watch_annotations` tool.
+- **Target one session or broadcast**: a note goes either to a specific parked session's
+  private queue (explicit target) or to the project's shared inbox (no target) — see
+  [Session routing](#session-routing-multi-session).
 - Fully local. No cloud, no account, no API key.
 
-Works with **Claude Code** out of the box; **Codex**, **Cursor**, and **Antigravity**
-via `vibepin init --agent <name>` or the MCP tools — any MCP-capable agent, really.
+Works with **Claude Code** out of the box; **Codex**, **Cursor**, **Antigravity**, and
+**omp** (oh-my-pi) via `vibepin init --agent <name>` or the MCP tools — any MCP-capable
+agent, really.
 
 > 🌐 **Live demo** (press ⌥A right on the page): https://yiwang3.github.io/vibepin · ▶ [watch the demo](https://yiwang3.github.io/vibepin/demo.mp4)
 > 📖 Chinese quickstart: [GETTING_STARTED.md](GETTING_STARTED.md)
@@ -62,15 +66,20 @@ Below: architecture & reference.
 
 ```mermaid
 flowchart LR
-  O["Overlay on any page<br/>⌥A · click / drag · note"] -- POST --> D["daemon :7331"]
-  D --> I[".vibepin/inbox.jsonl"]
+  O["Overlay on any page<br/>⌥A · click / drag · note"] -- "POST (optional targetSession)" --> D["daemon :7331"]
+  D -- "no target / unknown target" --> I[".vibepin/inbox.jsonl<br/>broadcast"]
+  D -- "explicit target" --> Q[".vibepin/sessions/&lt;sid&gt;.jsonl"]
   I --> P{"your agent<br/>picks it up"}
+  Q --> P
   P -- MCP --> M["watch_annotations<br/>long-poll → edit → loop"]
   P -- file --> F["watch.js → claim.js<br/>edit → re-arm → loop"]
+  O -- "GET /sessions (read-only)" --> D
 ```
 
 The agent gets the annotation in one of two interchangeable ways — an **MCP**
 `watch_annotations` long-poll, or a **zero-dep file watcher** (`watch.js` → `claim.js`).
+Both can watch the shared inbox **and** a per-session queue (see
+[Session routing](#session-routing-multi-session)).
 
 The architecture constraint this respects: an MCP server / browser extension can
 **never push** an agent turn — the agent (client) must initiate. So the wake is
@@ -135,8 +144,10 @@ control back to you; each time you Send annotations it wakes, edits the right fi
 and re-arms. **Zero idle token cost** — the waiting happens in a shell process, not
 the model — and you can keep typing other requests in the same window.
 
-Under the hood it loops `vibepin watch` (blocks until the inbox grows) → `vibepin claim`
-(drains + archives as JSON) → edit → re-arm.
+Under the hood it loops `vibepin watch --queue .vibepin/sessions/<sid>.jsonl --session <sid>`
+(blocks until your queue **or** the shared inbox changes) → `vibepin claim` with the same
+two flags (drains both, prints one de-duplicated JSON array, archives to `processed.jsonl`)
+→ edit → re-arm with the same `<sid>`.
 
 ### Alternative: MCP watch mode
 
@@ -146,28 +157,94 @@ Register the daemon's `/mcp` and tell Claude Code **“start watching vibepin”
 claude mcp add --transport http vibepin http://127.0.0.1:7331/mcp
 ```
 
-Tools: `watch_annotations` (long-poll), `list_annotations`, `resolve_annotation`.
+Tools: `watch_annotations` (long-poll), `list_annotations`, `resolve_annotation` — each
+takes an optional `sessionId`, so an MCP session can read its own queue plus the shared
+inbox (without it you get the shared inbox only, exactly as before). Never use MCP's
+connection-level `mcp-session-id` as a routing key: it is random and dies on reconnect.
 Note: the agent **polls**, so it keeps spending tokens while idle — fine for
 hands-free, worse for cost. Needs `npm install` (pulls `@modelcontextprotocol/sdk`).
 
-Both modes read the same `.vibepin/inbox.jsonl`.
-
-## Other agents (Codex · Cursor · Antigravity)
+## Other agents (Codex · Cursor · Antigravity · omp)
 
 The loop is agent-agnostic — only the wiring differs. `init` writes that agent's
 `/vpin` command/prompt (the token-cheap file-watcher loop) and prints its MCP
-snippet as the alternative:
+snippet as the alternative. Which wake path each agent can actually take:
+
+| Agent | Wake path(s) it can use | How a session id gets in |
+| --- | --- | --- |
+| **Claude Code** | file watcher (`/vpin`, background job) · MCP long-poll | `--session <sid>` / tool arg `sessionId` |
+| **omp** | file watcher (the job *exiting* re-enters the session) · MCP | `--session <sid>` / tool arg `sessionId` |
+| **Codex** | file watcher (`/vpin` prompt) · MCP (stdio bridge `mcp-remote`) | `--session <sid>` / tool arg `sessionId` |
+| **Cursor** | file watcher (`/vpin` command) · MCP (native HTTP) | `--session <sid>` / tool arg `sessionId` |
+| **Antigravity** | **MCP only** — nothing on its side can park a watcher, so the lease is upserted by the daemon | tool arg `sessionId` |
+
+Why the last row is narrower: a wake has to be **agent-side**
+([adapters/omp.md](adapters/omp.md)) — the daemon, the MCP server and the browser extension
+can never push a model turn. Codex additionally cannot heartbeat over HTTP at all (its
+shell is network-sandboxed), which is why all heartbeats are file writes.
+
+The one-command wiring per agent:
 
 ```bash
 npx vibepin init --agent codex        # ~/.codex/prompts/vpin.md
 npx vibepin init --agent cursor       # .cursor/commands/vpin.md (run in your project)
 npx vibepin init --agent antigravity  # MCP-only — prints the snippet to register
+npx vibepin init --agent omp          # project wiring (below); --root <dir> to target another project
+npx vibepin init --agent omp --upgrade # rewrite omp's SKILL.md + AGENTS.md section after a protocol change
 npx vibepin init --agent all          # all of the above + Claude Code
 ```
 
+omp (oh-my-pi) is the one target with no agent-side command file: it reads `AGENTS.md`
+by itself, so `init --agent omp` wires the *project* instead — a seeded
+`.vibepin/config.json`, a `.gitignore` rule, the `vibepin-annotations` skill at
+`.omp/skills/`, and a `## 注记（vibepin）` section in `AGENTS.md` holding the exact
+`watch → claim` commands. For **omp** it is idempotent — existing files are **reported,
+never rewritten** (so an already-wired project needs `--upgrade` to pick up a protocol
+change) — and `--dry-run` prints the plan without touching disk; `--vibepin-dir <dir>`
+points the generated commands at a specific checkout instead of the installed package.
+The `claude` / `codex` / `cursor` targets are deliberately the opposite: `init`
+**overwrites** their command/prompt files (`copyFileSync`), which is exactly what makes a
+re-run an upgrade.
+
 Per-agent details: [adapters/codex.md](adapters/codex.md) ·
-[adapters/cursor.md](adapters/cursor.md) · [adapters/antigravity.md](adapters/antigravity.md).
-All transports read the same `.vibepin/inbox.jsonl`.
+[adapters/cursor.md](adapters/cursor.md) · [adapters/antigravity.md](adapters/antigravity.md) ·
+[adapters/omp.md](adapters/omp.md).
+All transports read the shared `.vibepin/inbox.jsonl` and, when a session id is given, that
+session's own queue — see [Session routing](#session-routing-multi-session).
+
+## Session routing (multi-session)
+
+A project can have several parked sessions at once (two Claude Code windows, an omp session,
+a Codex session…). vibepin keeps them apart with **explicit targets, isolated queues, and
+UI-only liveness**:
+
+- **Delivery is explicit, never guessed.** A note either carries a target or it doesn't.
+  With a target it is appended **only** to `.vibepin/sessions/<sid>.jsonl`; without one it
+  goes to the shared `.vibepin/inbox.jsonl`, exactly as before. If the target has no lease
+  record any more, the daemon degrades to broadcast and says so
+  (`routed:"broadcast", degraded:true`) — it never picks a session on its own.
+- **One queue per session, no shadow copies.** `claim.js` takes whole files by atomic
+  rename, so isolation has to be at the file level; a copy in the shared inbox would be
+  claimed by whichever session got there first and would wake every other session for
+  nothing. Only the numeric audit trail (`.vibepin/routed.jsonl`, `claims.jsonl`) records
+  routing, and it holds metadata only — no note text.
+- **Liveness is display-only.** `.vibepin/sessions/<sid>.json` is a lease refreshed by the
+  parked watcher (and upserted by the daemon for MCP sessions); `GET /sessions` reports
+  `lastSeenAt` / `pending` for the panel, and a stale lease changes only the label
+  ("last active N minutes ago") — never whether a note is delivered.
+- **Sessions are plain files, not a service.** The registry lives on disk in
+  `.vibepin/sessions/*.json`; there is **no HTTP write endpoint**, so a page can neither
+  register nor hijack a session. `GET /sessions` is read-only and returns just
+  `{sessionId, agent, label, lastSeenAt, pending, mode}` — never `cwd`, `pid`, or absolute
+  paths.
+- **Reading it back.** The panel pre-fills the only session when exactly one is parked,
+  lists candidates when there are more, and the toast reports the real outcome
+  (`Sent 2 → omp-2f9c1a` / broadcast / degraded). From a shell:
+  `npx vibepin sessions` (list sid · agent · label · last activity · pending) and
+  `npx vibepin claim --queue .vibepin/sessions/<sid>.jsonl`.
+
+Upgrading an already-wired project — and what happens if you don't — is covered in
+[docs/20260918-session-routing-migration.md](docs/20260918-session-routing-migration.md).
 
 ## Overlay UX
 

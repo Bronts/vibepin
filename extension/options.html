@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vibepin — overlay settings</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 16px; min-width: 340px; max-width: 620px;
+    font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    background: #161616; color: #e8e8e8;
+  }
+  h1 { font-size: 14px; margin: 0 0 2px; letter-spacing: .01em; }
+  h1 span { color: #f5c518; }
+  p.sub { margin: 0 0 14px; color: #9a9a9a; font-size: 12px; }
+  section { border: 1px solid #2c2c2c; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #1c1c1c; }
+  section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #9a9a9a; margin: 0 0 8px; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  .k { flex: 0 0 92px; color: #9a9a9a; font-size: 12px; }
+  .v { flex: 1 1 auto; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+  .v.ok { color: #8bd5a0; }
+  .v.bad { color: #e0a056; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #6f6f6f; margin-right: 6px; }
+  .dot.ok { background: #8bd5a0; }
+  .dot.bad { background: #e0a056; }
+  form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=number] {
+    width: 100px; padding: 5px 8px; border-radius: 6px; border: 1px solid #3a3a3a;
+    background: #111; color: #e8e8e8; font: 12px ui-monospace, Menlo, Consolas, monospace;
+  }
+  input[type=number]:focus { outline: none; border-color: #f5c518; }
+  button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid #3a3a3a; background: #262626;
+    color: #e8e8e8; font: 12px inherit; cursor: pointer;
+  }
+  button:hover { background: #303030; border-color: #4a4a4a; }
+  label.switch { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+  label.switch input { margin: 2px 0 0; accent-color: #f5c518; }
+  label.switch b { font-weight: 600; }
+  .list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .cand, .site, .srow { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; background: #212121; }
+  .cand.on, .srow.on { box-shadow: inset 0 0 0 1px #f5c518; }
+  .cand input { accent-color: #f5c518; margin: 0; }
+  .cand .cbody, .site .sname { flex: 1 1 auto; min-width: 0; }
+  .cname, .site .sname, .srow .sn { font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+  .cmeta, .srow .sm { color: #9a9a9a; font-size: 11.5px; margin-top: 2px; word-break: break-all; }
+  .srow { flex-direction: column; gap: 0; }
+  .empty { color: #6f6f6f; font-size: 11.5px; }
+  select {
+    padding: 4px 6px; border-radius: 6px; border: 1px solid #3a3a3a; background: #111;
+    color: #e8e8e8; font: 12px ui-monospace, Menlo, Consolas, monospace; max-width: 100%;
+  }
+  select:focus { outline: none; border-color: #f5c518; }
+  .hint { color: #9a9a9a; font-size: 11.5px; margin: 6px 0 0 22px; }
+  #msg { min-height: 16px; margin: 0 0 8px; font-size: 12px; color: #8bd5a0; }
+  #msg.bad { color: #e0a056; }
+  footer { color: #6f6f6f; font-size: 11.5px; }
+  code { background: #262626; border-radius: 4px; padding: 1px 4px; font: 11.5px ui-monospace, Menlo, Consolas, monospace; }
+  a { color: #f5c518; }
+</style>
+</head>
+<body>
+  <h1>vibepin<span>.</span> overlay</h1>
+  <p class="sub">The overlay is injected into pages you open, and talks to whichever vibepin daemon answers locally.</p>
+
+  <section>
+    <h2>Daemon</h2>
+    <div class="row"><div class="k">status</div><div class="v" id="status"><span class="dot"></span>scanning…</div></div>
+    <div class="row"><div class="k">endpoint</div><div class="v" id="endpoint">—</div></div>
+    <div class="row"><div class="k">inbox</div><div class="v" id="inbox">—</div></div>
+    <div class="row"><div class="k">project</div><div class="v" id="project">—</div></div>
+    <div class="row"><div class="k">pending</div><div class="v" id="pending">—</div></div>
+    <div class="row"><div class="k">sessions</div><div class="v" id="sessionCount">—</div></div>
+    <div class="list" id="candidates"></div>
+    <p class="hint" style="margin-left:0">Every project runs its own daemon (ports 7331–7370). Without a choice the lowest port wins — which can point one project's page at another project's inbox. Picking one below remembers it for the site row it belongs to.</p>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <div class="list" id="sites"></div>
+    <p class="hint" style="margin-left:0">Which daemon a page origin belongs to. The injected overlay reads this before falling back to the lowest port. <b>Auto</b> = today's behaviour.</p>
+  </section>
+
+  <section>
+    <h2>Sessions</h2>
+    <div class="row"><div class="k">default</div><div class="v" id="targetWrap"><select id="target"></select></div></div>
+    <div class="row"><div class="k">last claim</div><div class="v" id="lastClaim">—</div></div>
+    <div class="list" id="sessions"></div>
+    <p class="hint" id="sessionsNote" style="margin-left:0"></p>
+    <p class="hint" style="margin-left:0"><b>A note's target is chosen in the overlay panel, not here.</b> On a <code>file://</code> page there is no extension context at all, so the panel must be self-sufficient; this section records what the daemon reports and remembers a default per project.</p>
+  </section>
+
+  <section>
+    <h2>Port</h2>
+    <form id="portForm">
+      <input type="number" id="port" min="1" max="65535" placeholder="auto">
+      <button type="submit" id="save">Save</button>
+      <button type="button" id="rescan">Re-detect</button>
+    </form>
+    <p class="hint" id="portHint"></p>
+  </section>
+
+  <section>
+    <h2>Scope</h2>
+    <label class="switch">
+      <input type="checkbox" id="localOnly">
+      <span><b>Only on local pages</b><br><span class="hint" style="margin:0">On (default): <code>http://localhost</code> and <code>http://127.0.0.1</code> pages only. Off: the overlay also runs on the http(s) pages you grant it — staging, or a site you don't own. Nothing is injected on other sites until you grant it here.</span></span>
+    </label>
+  </section>
+
+  <p id="msg"></p>
+  <footer>Press <code>Alt+A</code> (⌥A) on a page to toggle the overlay. New settings apply to pages you open or reload after saving.</footer>
+
+  <script src="discover.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

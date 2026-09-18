@@ -1,0 +1,21 @@
+:root {
+  --bg: #101011;
+  --panel: #17171a;
+  --text: #e8e8ea;
+  --muted: #9a9aa3;
+  --line: #26262b;
+  --accent: #f5c518;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.wrap { max-width: 960px; margin: 0 auto; padding: 0 32px; }
+
+button { font-family: inherit; }

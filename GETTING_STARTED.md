@@ -118,7 +118,7 @@ npx vibepin init
 /vpin
 ```
 
-它会用**后台文件 watcher** 挂起监听,然后**把输入权还给你**:
+它会用**后台文件 watcher** 挂起监听(同时盯着**本会话队列**与**共享留言本**),然后**把输入权还给你**:
 
 - 你在浏览器点 / 拖 + Send → watcher 醒来 → Claude 自动改对应文件,循环。
 - 等待期间**不花 token**(等待发生在 shell 进程里,不经过模型),
@@ -129,6 +129,48 @@ npx vibepin init
 > **为什么不用 MCP 的 `watch_annotations`?** 那是"模型轮询":每隔几十秒模型被重新唤起、
 > 重读上下文再查一次,**空闲也持续烧 token**。`/vpin` 的文件 watcher 把"等待"放在模型外面,空闲零成本。
 > (MCP 模式仍可用,见 [README.md](README.md);适合只想 hands-free、不在乎 token 的场景。)
+
+---
+
+### 其他 agent（Codex / Cursor / Antigravity / omp）
+
+同一个循环，只是接线不同 —— `init` 还认这些目标：
+
+```bash
+npx vibepin init --agent codex        # ~/.codex/prompts/vpin.md
+npx vibepin init --agent cursor       # .cursor/commands/vpin.md（在项目里跑）
+npx vibepin init --agent antigravity  # 只印 MCP 注册片段
+npx vibepin init --agent omp --root . # 写项目接线（见下）
+npx vibepin init --agent all          # 以上全部 + Claude Code
+```
+
+唤醒路径不是每家都一样：**Antigravity 只有 MCP 一条**（它没有客户端进程能挂后台 watcher，会话租约由 daemon 代写），其余四家既能挂文件 watcher、也能走 MCP；Codex 的 shell 被网络沙箱掐掉，所以心跳一律只走文件写。各适配器细节见 `adapters/`（每家第一段都标了自己的唤醒路径）。
+
+**omp（oh-my-pi）** 没有 agent 侧的命令文件 —— 它自己会读 `AGENTS.md`，所以
+`init --agent omp` 接的是**项目**：`.vibepin/config.json`、`.gitignore` 规则、
+`.omp/skills/vibepin-annotations/SKILL.md`、以及 `AGENTS.md` 里的「## 注记（vibepin）」节
+（内含可直接挂后台作业的 `watch → claim` 命令）。默认 cwd，`--root <目录>` 可指向别的项目；
+已有文件一律**只报告、不重写**（幂等）—— 所以协议升级要显式加 `--upgrade`
+（只重写 SKILL.md 与 AGENTS.md 注记节，`config.json` 仍旧只校验）；
+`--dry-run` 只打印计划、不落盘，
+`--vibepin-dir <目录>` 把生成的命令指向指定的 vibepin checkout（默认指向本包）。
+（`claude` / `codex` / `cursor` 三家相反：`init` 会**覆盖**它们的命令文件，重跑即升级。）
+
+---
+
+## 多会话路由（同一项目开着多个会话时）
+
+一句话：**目标显式、队列隔离、判活只影响 UI。**
+
+- **目标显式**：面板发注记时要么指定某个会话（写 `.vibepin/sessions/<sid>.jsonl`），要么不指定（写共享 `.vibepin/inbox.jsonl`，所有人都会收到）。服务端**不猜** —— 目标没有租约记录时只会降级成广播并如实告诉你，不会自己挑一个会话。
+- **队列隔离**：每个会话一个队列文件，互不串台；定向注记**不做副本**（副本会被别的会话抢走，还会白唤醒项目里每个会话）。只有不带目标的注记才走共享留言本。
+- **判活只影响 UI**：`.vibepin/sessions/<sid>.json` 是会话租约，`GET /sessions` 让面板显示"最后活动 N 分钟前"和待办条数；**它绝不决定注记投给谁** —— 会话很久没动，注记照样进它的队列。
+
+面板的行为：只开着**一个**会话时自动预填它（去向行写着发给谁）；开着**多个**时不预填，列出来让你选，选过的记住；**零个**会话就是广播。
+
+升级：已经接过的项目要换成带 `--queue`/`--session` 的新命令（omp 还要 `npx vibepin init --agent omp --upgrade`），
+**没迁移的后果**、逐文件清单与改前/改后命令见
+[docs/20260918-session-routing-migration.md](docs/20260918-session-routing-migration.md)。
 
 ---
 
@@ -161,6 +203,9 @@ npx vibepin init
 - **`EADDRINUSE: 7331`**(端口被占):`lsof -ti tcp:7331 | xargs kill` 然后重来。
 - **Claude Code 连不上 MCP / 提示 MCP off**:在 `vibepin` 目录跑过 `npm install` 没有?MCP 模式需要它。
 - **Send 失败**:daemon 没在跑,或端口不是 7331。看 dev 日志里的 `[vibepin] daemon ...` 那几行。
+- **显示已发送但会话没反应**:该会话可能还在跑旧命令(只收广播)。定向注记会堆在
+  `.vibepin/sessions/<sid>.jsonl`:用 `npx vibepin sessions` 看 sid 与待办,`npx vibepin claim --queue .vibepin/sessions/<sid>.jsonl` 取回;
+  迁移步骤见 [docs/20260918-session-routing-migration.md](docs/20260918-session-routing-migration.md)。
 
 ---
 
