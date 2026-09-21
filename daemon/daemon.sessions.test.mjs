@@ -287,3 +287,46 @@ test('/health counts every queue, and /sessions stays read-only', async () => {
   const res = await fetch(`${base}/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(res.status, 404);
 });
+
+// T19 — write batches are stamped by the daemon (§1.1): one POST = one `w-…` id,
+// seq 1..n, total n, and the id is never taken from the page. The response body
+// stays exactly what it was (the overlay reads received/routed/target/degraded).
+test('every POST stamps its own write batch without changing the response body', async () => {
+  const inboxBefore = await readLines(inbox);
+  const { status, body } = await post([{ id: 'w1', note: 'a' }, { id: 'w2', note: 'b' }, { id: 'w3', note: 'c' }]);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true, received: 3, routed: 'broadcast', pending: inboxBefore.length + 3 }, 'the response body is byte-for-byte the v2 shape');
+
+  const rows = (await readLines(inbox)).slice(inboxBefore.length).map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => r.batch.seq), [1, 2, 3]);
+  assert.deepEqual(rows.map((r) => r.batch.total), [3, 3, 3]);
+  assert.equal(new Set(rows.map((r) => r.batch.id)).size, 1, 'one POST is one write batch');
+  assert.match(rows[0].batch.id, /^w-\d{8}-\d{6}-[0-9a-f]{4}$/);
+  const first = rows[0].batch.id;
+
+  // A second POST is a second write batch (and a new id, not a continuation).
+  const again = await post([{ id: 'w4' }, { id: 'w5' }]);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.received, 2);
+  const more = (await readLines(inbox)).slice(inboxBefore.length + 3).map((l) => JSON.parse(l));
+  assert.equal(new Set(more.map((r) => r.batch.id)).size, 1);
+  assert.notEqual(more[0].batch.id, first);
+  assert.deepEqual(more.map((r) => r.batch.seq), [1, 2]);
+
+  // A targeted POST carries the stamp onto the session queue too: the whitelist is
+  // the same code path, so a routed record cannot be born without provenance.
+  const queueFile = join(sessionsDir, 'omp-aaa111.jsonl');
+  const queueBefore = await readLines(queueFile);
+  const routed = await post({ annotations: [{ id: 'w6', note: 'directed' }], targetSession: 'omp-aaa111' });
+  assert.equal(routed.status, 200);
+  assert.equal(routed.body.ok, true);
+  assert.equal(routed.body.received, 1);
+  assert.equal(routed.body.routed, 'session');
+  assert.equal(routed.body.target, 'omp-aaa111');
+  assert.equal(typeof routed.body.pending, 'number');
+  const directed = JSON.parse((await readLines(queueFile)).at(-1));
+  assert.match(directed.batch.id, /^w-\d{8}-\d{6}-[0-9a-f]{4}$/);
+  assert.deepEqual([directed.batch.seq, directed.batch.total], [1, 1]);
+  assert.notEqual(directed.batch.id, first);
+  assert.equal(queueBefore.length + 1, (await readLines(queueFile)).length);
+});

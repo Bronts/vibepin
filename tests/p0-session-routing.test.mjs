@@ -3,9 +3,13 @@
 //
 //   node --test tests/
 //
-// The "BEFORE" arm of every P0 case runs the code as committed (extracted with
-// `git show HEAD:<file>` into a temp dir), so each fix is proven to fail before
-// and pass after without rewriting repo history.
+// The "BEFORE" arm of every P0 case runs the code as it shipped before the §7
+// fixes (extracted with `git show <rev>:<file>` into a temp dir), so each fix is
+// proven to fail before and pass after without rewriting repo history.
+//
+// The revision is pinned to the PARENT of d21e5dc, the commit the fixes landed
+// in: with a moving `HEAD` the BEFORE arm hands itself the AFTER code (every
+// regression assertion would then check the fix against itself).
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,12 +27,13 @@ const CLI = join(REPO, 'bin', 'vibepin.js');
 
 // --- the shipped (pre-fix) scripts, extracted once -----------------------------
 
+const BEFORE_REV = 'd21e5dc^';
 const OLD = mkdtempSync(join(tmpdir(), 'vibepin-old-'));
 const OLD_SCRIPT = { watch: join(OLD, 'watch.mjs'), claim: join(OLD, 'claim.mjs') };
 const heap = [OLD];
 
 for (const [name, src] of [['watch', 'daemon/watch.js'], ['claim', 'daemon/claim.js'], ['store', 'daemon/store.js']]) {
-  const text = execFileSync('git', ['-C', REPO, 'show', `HEAD:${src}`], { encoding: 'utf8', maxBuffer: 1 << 24 });
+  const text = execFileSync('git', ['-C', REPO, 'show', `${BEFORE_REV}:${src}`], { encoding: 'utf8', maxBuffer: 1 << 24 });
   writeFileSync(join(OLD, `${name}.mjs`), text);
 }
 const oldStore = await import(pathToFileURL(join(OLD, 'store.mjs')).href);
@@ -302,8 +307,10 @@ test('P0-3 claim drains the second file when the first one is missing', async ()
   assert.equal(before.out.trim(), '[]', 'BEFORE-FIX: expected the old claim to give up on the missing first file');
   assert.ok(existsSync(queue), 'BEFORE-FIX: expected the session queue to stay untouched');
 
-  // AFTER: each file is claimed independently.
-  const after1 = await run(CLAIM, ['--inbox', missingInbox, '--queue', queue, '--session', 's1']);
+  // AFTER: each file is claimed independently. --json: a session claim prints the
+  // delivery header in front of the payload (the bare array is the legacy,
+  // session-less contract), so the machine-readable arm asks for it explicitly.
+  const after1 = await run(CLAIM, ['--inbox', missingInbox, '--queue', queue, '--session', 's1', '--json']);
   assert.equal(after1.code, 0, after1.err);
   assert.deepEqual(JSON.parse(after1.out).map((i) => i.id), ['q-1']);
   assert.ok(!existsSync(queue), 'AFTER-FIX: the queue must be drained');
@@ -337,7 +344,7 @@ test('P0-3b both files drain, queue batch first, duplicate ids once', async () =
   writeFileSync(queue, line('dup', 'from queue') + line('q-2', 'from queue'));
   writeFileSync(inbox, line('dup', 'from inbox') + line('b-2', 'from inbox'));
 
-  const out = await run(CLAIM, ['--inbox', inbox, '--queue', queue, '--session', 's1']);
+  const out = await run(CLAIM, ['--inbox', inbox, '--queue', queue, '--session', 's1', '--json']);
   assert.equal(out.code, 0, out.err);
   const items = JSON.parse(out.out);
   assert.deepEqual(items.map((i) => i.id), ['dup', 'q-2', 'b-2'], 'queue first, deduped, then the shared inbox');
@@ -446,13 +453,18 @@ test('P1-1 watch registers a lease, claim refreshes it and appends claims.jsonl'
   await watcher.exited;
 
   writeFileSync(queue, line('q-1', 'directed'));
-  const out = await run(CLAIM, ['--inbox', inbox, '--queue', queue, '--session', 'omp-abc123']);
+  const out = await run(CLAIM, ['--inbox', inbox, '--queue', queue, '--session', 'omp-abc123', '--json']);
   assert.equal(out.code, 0, out.err);
   assert.deepEqual(JSON.parse(out.out).map((i) => i.id), ['q-1']);
   const refreshed = JSON.parse(readFileSync(join(dir, 'sessions', 'omp-abc123.json'), 'utf8'));
   assert.ok(Number.isFinite(refreshed.lastClaimAt), 'claim --session refreshes lastClaimAt');
   assert.equal(refreshed.startedAt, lease.startedAt, 'a refresh never re-stamps startedAt');
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'claims.jsonl'), 'utf8').trim()), { ids: ['q-1'], sessionId: 'omp-abc123', at: refreshed.lastClaimAt });
+  // The accounting line carries the ledger id (§1.2): without it a lost
+  // batches/<id>.json could not be rebuilt from claims.jsonl + processed.jsonl.
+  const claims = JSON.parse(readFileSync(join(dir, 'claims.jsonl'), 'utf8').trim());
+  assert.deepEqual(claims, { ids: ['q-1'], sessionId: 'omp-abc123', at: refreshed.lastClaimAt, batchId: claims.batchId });
+  assert.match(claims.batchId, /^b-\d{8}-\d{6}-[0-9a-f]{4}$/);
+  assert.ok(existsSync(join(dir, 'batches', `${claims.batchId}.json`)), 'the claim opened its ledger');
 });
 
 test('P1-2 claim without --session writes no audit and no lease (old usage is untouched)', async () => {
@@ -478,11 +490,11 @@ test('P1-3 a bare sid and a queue path both work, and a bad sid fails without wr
   mkdirSync(join(dir, 'sessions'), { recursive: true });
   writeFileSync(join(dir, 'sessions', 's9.jsonl'), line('q-9', 'bare sid'));
 
-  const bySid = await run(CLAIM, ['--inbox', inbox, '--queue', 's9']);
+  const bySid = await run(CLAIM, ['--inbox', inbox, '--queue', 's9', '--json']);
   assert.deepEqual(JSON.parse(bySid.out).map((i) => i.id), ['q-9']);
 
   writeFileSync(join(dir, 'sessions', 's9.jsonl'), line('q-10', 'by path'));
-  const byPath = await run(CLAIM, ['--inbox', inbox, '--queue', join(dir, 'sessions', 's9.jsonl')]);
+  const byPath = await run(CLAIM, ['--inbox', inbox, '--queue', join(dir, 'sessions', 's9.jsonl'), '--json']);
   assert.deepEqual(JSON.parse(byPath.out).map((i) => i.id), ['q-10']);
 
   const bad = await run(CLAIM, ['--inbox', inbox, '--queue', '../escape.jsonl', '--session', '../evil']);
@@ -524,7 +536,7 @@ test('P2-1 vibepin sessions lists leases with pending counts and last activity',
   assert.match(text.out, /claim --queue <sid>/, 'the hint must be the spec §11.4 recovery channel');
 
   // ...and that hint must really drain the queue it names: bare sid, no --queue path.
-  const recovered = await run(CLI, ['claim', '--inbox', inbox, '--queue', 'omp-1']);
+  const recovered = await run(CLI, ['claim', '--inbox', inbox, '--queue', 'omp-1', '--json']);
   assert.equal(recovered.code, 0, recovered.err);
   assert.deepEqual(JSON.parse(recovered.out).map((i) => i.id), ['p1', 'p2']);
   assert.ok(!existsSync(join(dir, '.vibepin', 'sessions', 'omp-1.jsonl')));
@@ -558,10 +570,10 @@ test('P2-2 init --agent omp reports the old protocol, and --upgrade rewrites onl
   assert.match(up.out, /rewrote \.omp\/skills\/vibepin-annotations\/SKILL\.md/);
   assert.match(up.out, /rewrote AGENTS\.md/);
   const skill = readFileSync(skillPath, 'utf8');
-  assert.ok(skill.includes('<!-- vibepin:session-routing-v2 -->'), 'the v2 marker lands in SKILL.md');
-  assert.ok(skill.includes('--queue'), 'the v2 commands are in the skill');
+  assert.ok(skill.includes('<!-- vibepin:batch-ledger-v4 -->'), 'the batch-ledger marker lands in SKILL.md');
+  assert.ok(skill.includes('--queue'), 'the routed commands are still in the skill');
   const agents = readFileSync(agentsPath, 'utf8');
-  assert.ok(agents.includes('<!-- vibepin:session-routing-v2 -->'), 'the v2 marker lands in the AGENTS.md section');
+  assert.ok(agents.includes('<!-- vibepin:batch-ledger-v4 -->'), 'the batch-ledger marker lands in the AGENTS.md section');
   assert.match(agents, /--queue .*sessions\/<sid>\.jsonl --session <sid>/, 'the printed command uses the new form');
   assert.ok(agents.startsWith('# My project\n\nSome rules that must survive.'), 'text before the section survives');
   assert.match(agents, /## After\n\nkeep me/, 'text after the section survives');
@@ -569,7 +581,7 @@ test('P2-2 init --agent omp reports the old protocol, and --upgrade rewrites onl
 
   // idempotent afterwards
   const again = await run(CLI, ['init', '--agent', 'omp', '--root', dir]);
-  assert.match(again.out, /already session-routing-v2/);
+  assert.match(again.out, /already batch-ledger-v4/);
   assert.match(again.out, /already wired up|Nothing to do/);
 });
 
@@ -589,9 +601,27 @@ test('P2-4 doctor reports the registry, the protocol and the daemon without inve
   mkdirSync(join(dir, '.vibepin', 'sessions'), { recursive: true });
   writeFileSync(join(dir, '.vibepin', 'sessions', 'omp-1.json'), JSON.stringify({ agent: 'omp', mode: 'file', watcherPid: 999999, lastReArmAt: Date.now() }));
   writeFileSync(join(dir, '.vibepin', 'sessions', 'omp-1.jsonl'), line('p1', 'waiting'));
+  // An unsettled ledger is debt, not a defect: doctor prints a `!` nudge and still
+  // exits 0 (v4 — ack is bookkeeping, never a delivery condition).
+  const openLedger = (at) => ({
+    v: 1, id: 'b-20260919-120000-0001', kind: 'claim', sessionId: 'omp-1', at, closedAt: null, ttlMs: 28800000,
+    files: [], sources: { queue: 1, inbox: 0, recovered: 0 },
+    pages: [{ url: 'http://localhost:5173/x', path: '/x', count: 1 }], writeBatches: [{ id: null, count: 1 }],
+    total: 1,
+    items: [{
+      seq: 1, id: 'p1', status: 'open', note: 'waiting', kind: 'element', component: null, source: null,
+      selector: '#a', url: 'http://localhost:5173/x', page: '/x', writeBatch: null, sourceFile: 'queue',
+      evidence: { file: 'processed.jsonl', line: 1 }, claimedAt: at, updatedAt: at,
+      history: [{ at, by: 'claim', from: null, to: 'open' }],
+    }],
+    forced: [], rebuilt: false,
+  });
+  mkdirSync(join(dir, '.vibepin', 'batches'), { recursive: true });
+  writeFileSync(join(dir, '.vibepin', 'batches', 'b-20260919-120000-0001.json'), `${JSON.stringify(openLedger(Date.now()))}\n`);
 
   const out = await run(CLI, ['doctor', '--root', dir]);
   assert.match(out.out, /1 lease\(s\)/);
+  assert.match(out.out, /批账本 1 个批，1 个未结清/);
   assert.match(out.out, /watcher pid 999999 is gone — 1 pending/);
   assert.match(out.out, /no vibepin daemon reachable on port 7399/);
   assert.equal(out.code, 0, `warnings are not defects: ${out.out}`);

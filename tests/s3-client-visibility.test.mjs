@@ -575,12 +575,15 @@ test('overlay against a pre-routing daemon: broadcast, and today’s receipt (§
   }
 });
 
-test('overlay §8.3/§9 before: HEAD has no destination row and reports only a count', { skip: SKIP }, async () => {
-  // The "before" arm the repo's P0 suite uses: run the shipped overlay (HEAD),
-  // both against the same daemon that already answers with `routed`, so the new
-  // assertions are proven to discriminate rather than to pass vacuously.
+test('overlay §8.3/§9 before: the pre-routing overlay has no destination row and reports only a count', { skip: SKIP }, async () => {
+  // The "before" arm the repo's P0 suite uses: run the overlay as it shipped
+  // BEFORE routing, both against the same daemon that already answers with
+  // `routed`, so the new assertions are proven to discriminate rather than to pass
+  // vacuously. The revision is pinned to d21e5dc's parent (the commit the routing
+  // overlay landed in): `git show HEAD:` would hand the arm the AFTER overlay, and
+  // the assertion below would be checking the feature against itself.
   const head = join(tmp('vibepin-s3-head-'), 'annotate.js');
-  writeFileSync(head, execFileSync('git', ['-C', REPO, 'show', 'HEAD:core/annotate.js'], { encoding: 'utf8', maxBuffer: 1 << 24 }));
+  writeFileSync(head, execFileSync('git', ['-C', REPO, 'show', 'd21e5dc^:core/annotate.js'], { encoding: 'utf8', maxBuffer: 1 << 24 }));
 
   const w = await makeWorld({ sessions: [oneSession('omp-2f9c1a', '改简历解析页')] }, { annotatePath: head });
   const chrome = await launchChrome({ urls: [w.directUrl()] });

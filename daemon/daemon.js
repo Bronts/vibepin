@@ -18,6 +18,7 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
 import { resolveInbox, createStore, isValidSid, lastSeenSeconds, readLeases, writeLease as writeLeaseFile } from './store.js';
+import { stamp as batchStamp, hex4 } from './batches.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -372,6 +373,10 @@ const server = http.createServer(async (req, res) => {
 
       await mkdir(dirname(INBOX), { recursive: true });
       const now = Date.now();
+      // One POST = one write batch. The id is minted here and never taken from
+      // the page: the batch number is the daemon's accounting, not a field a
+      // client may forge (the same reason inbox/projectRoot are stamped here).
+      const batchId = `w-${batchStamp(now)}-${hex4()}`;
       const records = items.map((a, i) => ({
         id: a.id || `${now}-${i}`,
         ts: a.ts || now,
@@ -390,6 +395,11 @@ const server = http.createServer(async (req, res) => {
         html: a.html || '',
         styles: a.styles || null,
         screenshot: a.screenshot || null,
+        // Write-batch provenance (seq is 1-based, the same number the overlay's
+        // pin list shows). claim.js groups these into ONE claim batch, so the
+        // ack key is the claim `seq` printed in the delivery header — this one is
+        // for tracing a record back to the POST that delivered it.
+        batch: { id: batchId, seq: i + 1, total: items.length },
         // Stamped here, never taken from the page: provenance has to be true
         // even when the overlay is stale or the page belongs to another project.
         inbox: INBOX,

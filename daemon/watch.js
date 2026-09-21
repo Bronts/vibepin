@@ -3,6 +3,12 @@
 // The harness runs it as a background job (0 tokens while it waits) and
 // re-invokes the agent in the same session when it exits.
 //
+// Exit codes are frozen at two: 0 = work is waiting (or the timeout fired) and
+// 2 = a watched file cannot be read. The batch ledger NEVER changes them — an
+// unsettled earlier batch is one summary line on stderr (claim.js prints the
+// itemized `## 未结清` block), because encoding "there is debt" as a non-zero
+// exit would break `watch && claim` and turn a 0-token park into a wake loop.
+//
 //   node watch.js --inbox <proj>/.vibepin/inbox.jsonl \
 //        [--queue <proj>/.vibepin/sessions/<sid>.jsonl] [--session <sid>] \
 //        [--label "改简历解析页"] [--agent omp]
@@ -19,6 +25,7 @@
 import { statSync, watchFile, unwatchFile, utimesSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { assertIsFile, createStore, resolveQueue, resolveSessionId, sessionPaths, writeLease } from './store.js';
+import { carryOverSync } from './batches.js';
 
 const argv = process.argv;
 const flag = (name) => { const i = argv.indexOf(name); return i !== -1 ? argv[i + 1] : undefined; };
@@ -100,6 +107,19 @@ function done(reason) {
   armed = false;
   for (const f of FILES) unwatchFile(f); // §7.1 fix 4: every watched file
   clearInterval(heartbeat);
+  // Display only, and deliberately after the decision: a wake is exit 0 no
+  // matter how much debt this session carries (v4 — the ledger never gates
+  // delivery, so it must never change an exit code either). An unreadable ledger
+  // directory means "nothing to show", not a second failure mode.
+  if (SID) {
+    try {
+      const rows = carryOverSync(INBOX, { sessionId: SID });
+      if (rows.length) {
+        const batches = [...new Set(rows.map((r) => r.batchId))].join(' · ');
+        process.stderr.write(`[vibepin] 未结清 ${rows.length} 项（${batches}）—— 不影响投递；逐条结清：vibepin ack --batch <id> --seq <n> --status done --note "改了什么"\n`);
+      }
+    } catch { /* display only */ }
+  }
   console.log(`[vibepin] wake: ${reason}`);
   process.exit(0);
 }

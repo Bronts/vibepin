@@ -9,3 +9,12 @@ dist/
 .env.*
 .npmrc
 resources/
+
+# claim 排空时队列文件被临时改名成 <file>.claiming（正常只出现在 .vibepin/ 内，这里兜底）
+*.claiming
+
+# Windows 资源管理器缩略图缓存
+Thumbs.db
+
+# Claude Code 本地权限/设置（.claude/commands/ 仍随仓库提交）
+.claude/settings.local.json

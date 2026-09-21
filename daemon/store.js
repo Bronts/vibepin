@@ -7,6 +7,7 @@
 //   <proj>/.vibepin/claims.jsonl         claim accounting (append-only, one line per batch)
 //   <proj>/.vibepin/sessions/<sid>.json  session lease (who has a queue)
 //   <proj>/.vibepin/sessions/<sid>.jsonl that session's queue
+//   <proj>/.vibepin/batches/<b-id>.json  claim batch ledger (daemon/batches.js)
 //
 // Why nothing here rewrites a queue file (§7.3): the old resolveByIds was a
 // read-modify-write — it snapshotted the file, awaited, then overwrote it with
@@ -67,6 +68,7 @@ export function pathsFor(inbox) {
   return {
     dir,
     sessions: join(dir, 'sessions'),
+    batches: join(dir, 'batches'),
     processed: join(dir, 'processed.jsonl'),
     claims: join(dir, CLAIMS_NAME),
   };
@@ -203,6 +205,17 @@ export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// The repo's single atomic-write implementation: temp file + rename (so a
+// concurrent poll can never read half a JSON document), with the directory
+// created on the way. writeLease and the batch ledger both go through here.
+export async function writeJsonAtomic(file, obj) {
+  await mkdir(dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  await writeFile(tmp, `${JSON.stringify(obj, null, 2)}\n`, 'utf8');
+  await rename(tmp, file);
+  return file;
+}
+
 // Atomic lease write (§4.2): temp file + rename, so a concurrent 1s poll can
 // never read half a JSON. `patch` is an object merged over the record on disk, or
 // a function of that record. startedAt is stamped once, on creation.
@@ -215,10 +228,7 @@ export async function writeLease(inbox, sid, patch) {
   } catch { /* absent or unreadable: start from an empty record */ }
   const next = typeof patch === 'function' ? patch(prev) : { ...prev, ...patch };
   if (typeof next.startedAt !== 'string') next.startedAt = new Date().toISOString();
-  await mkdir(dirname(lease), { recursive: true });
-  const tmp = `${lease}.tmp-${process.pid}`;
-  await writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
-  await rename(tmp, lease);
+  await writeJsonAtomic(lease, next);
   return next;
 }
 
