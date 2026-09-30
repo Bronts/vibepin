@@ -74,6 +74,7 @@
       count: (n) => `${n} 条`,
       tDrag: '拖动', tStatus: 'daemon 连接状态', tHide: '隐藏 · ⌥A 重新打开',
       tAnno: '进入/退出标注 (⌥A)', tEdit: '点击编辑', tRemove: '删除', tSettings: '设置',
+      tMini: '开关标注（右下角小钮）', miniBtn: '右下角小开关', miniShow: '显示', miniHide: '隐藏',
       tSend: `发送给 ${TARGET || '你的 agent'}`,
       sOk: 'daemon 已连接', sNoResp: 'daemon 无响应', sNo: 'daemon 未连接',
       // 目标行 / 回执 / 会话列表 (§8.3/§9)。面板是唯一能回答"这条发给谁"的地方：
@@ -108,6 +109,7 @@
       count: (n) => `${n}`,
       tDrag: 'Drag', tStatus: 'daemon status', tHide: 'Hide · ⌥A to reopen',
       tAnno: 'Toggle annotate (⌥A)', tEdit: 'Click to edit', tRemove: 'Remove', tSettings: 'Settings',
+      tMini: 'Toggle annotate (mini button)', miniBtn: 'Mini button', miniShow: 'Show', miniHide: 'Hide',
       tSend: `Send to ${TARGET || 'your agent'}`,
       sOk: 'daemon connected', sNoResp: 'daemon not responding', sNo: 'daemon not connected',
       targetLine: (x) => `Target: ${x}`, targetOf: (sid, why) => `${sid} (${why})`,
@@ -250,6 +252,21 @@
     .toast .ta{flex:0 0 auto;background:#2e572e;color:#dff5df;border:1px solid #3f7a3f;border-radius:6px;
                padding:3px 9px;font-size:11px;cursor:pointer}
     .toast .ta:hover{background:#3a6b3a}
+    /* 常驻迷你开关：右下角一颗 28px 圆钮。折叠态只剩图标，hover 横向展开露出
+       「标注中/标注」；进入标注态时常驻展开并整颗点亮，这样不靠快捷键也一眼
+       看得出当前是不是在标注。pointer-events 只作用在这颗钮上（overflow:hidden
+       让展开的余量不拦截点击），不挡页面。 */
+    .mini{position:fixed;right:16px;bottom:16px;z-index:2147483643;pointer-events:auto;
+          display:inline-flex;align-items:center;height:28px;padding:0;border:0;
+          border-radius:14px;overflow:hidden;cursor:pointer;
+          background:var(--ov-chip);color:var(--ov-chip-text);box-shadow:var(--ov-shadow);
+          opacity:.55;transition:opacity .15s,background .15s,padding .18s}
+    .mini:hover{opacity:1;padding-right:10px}
+    .mini.on{opacity:1;padding-right:10px;background:var(--ov-accent);color:var(--ov-ink)}
+    .mini svg{display:block;flex:0 0 auto;margin:0 6px}
+    .mini .mlabel{font-size:12px;line-height:1;white-space:nowrap;max-width:0;opacity:0;
+                  transition:max-width .18s,opacity .15s}
+    .mini:hover .mlabel,.mini.on .mlabel{max-width:90px;opacity:1}
     .hidden{display:none}
   </style>
   <div class="hl hidden"></div>
@@ -273,7 +290,8 @@
     </div>
     <div class="settings hidden"></div>
   </div>
-  <div class="toast"><span class="tx"></span><button class="ta hidden"></button></div>`;
+  <div class="toast"><span class="tx"></span><button class="ta hidden"></button></div>
+  <button class="mini" type="button"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg><span class="mlabel"></span></button>`;
 
   const $ = (s) => shadow.querySelector(s);
   const hlEl = $('.hl'), bandEl = $('.band'), tagEl = $('.tag'), panel = $('.panel'),
@@ -284,6 +302,14 @@
         clearBtn = $('.clear'), copyBtn = $('.copy'), toastEl = $('.toast'), destEl = $('.dest'),
         destPathEl = $('.dp'), destTargetEl = $('.dt'), toastTxEl = $('.tx'), toastActEl = $('.ta'),
         routeNoteEl = $('.routenote');
+  const miniBtn = $('.mini'), miniLabel = $('.mlabel');
+
+  // 常驻迷你钮默认开着；存 '0' 才关。读取失败（隐私模式等）按默认开——它是
+  // 「面板被关掉之后唯一的入口」，默认关掉等于给用户留一个进不去的死路。
+  let miniOn = (() => {
+    try { return localStorage.getItem('__vibepin_mini') !== '0'; } catch { return true; }
+  })();
+  miniBtn.classList.toggle('hidden', !miniOn);
 
   // ---- helpers -----------------------------------------------------------
   // Ids a component library invents while rendering come back different on the
@@ -764,6 +790,8 @@
   function updatePanel() {
     atogBtn.classList.toggle('on', on);
     atogLabel.textContent = on ? t('annotating') : t('annotate');
+    miniBtn.classList.toggle('on', on);
+    miniLabel.textContent = on ? t('annotating') : t('annotate');
     countEl.textContent = pending.length ? t('count')(pending.length) : '';
     setBtn.classList.toggle('on', settingsOpen);
     settingsEl.classList.toggle('hidden', !settingsOpen);
@@ -929,6 +957,9 @@
   }
 
   atogBtn.addEventListener('click', () => toggle());
+  // 迷你钮走同一个 toggle：capture 态、面板显隐、toast 提示全部复用，不另开一条
+  // 状态路径。面板被 hideBtn 关掉后，这颗钮是唯一还能把它叫回来的入口。
+  miniBtn.addEventListener('click', () => toggle());
   hideBtn.addEventListener('click', () => { if (on) toggle(false); panel.classList.add('hidden'); });
   setBtn.addEventListener('click', () => {
     settingsOpen = !settingsOpen;
@@ -1002,11 +1033,23 @@
       `<span class="seg2">` +
       `<button data-l="zh" class="${lang === 'zh' ? 'on' : ''}">中文</button>` +
       `<button data-l="en" class="${lang === 'en' ? 'on' : ''}">English</button>` +
+      `</span></div>` +
+      `<div class="setrow"><span class="langlabel">${esc(t('miniBtn'))}</span>` +
+      `<span class="seg2">` +
+      `<button data-mb="1" class="${miniOn ? 'on' : ''}">${esc(t('miniShow'))}</button>` +
+      `<button data-mb="0" class="${miniOn ? '' : 'on'}">${esc(t('miniHide'))}</button>` +
       `</span></div>`;
     settingsEl.querySelectorAll('[data-sid]').forEach((r) =>
       r.addEventListener('click', () => setTarget(r.dataset.sid)));
     settingsEl.querySelectorAll('[data-l]').forEach((b) => b.addEventListener('click', () => setLang(b.dataset.l)));
     settingsEl.querySelectorAll('[data-tm]').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.tm)));
+    settingsEl.querySelectorAll('[data-mb]').forEach((b) => b.addEventListener('click', () => setMini(b.dataset.mb === '1')));
+  }
+  function setMini(v) {
+    miniOn = v;
+    miniBtn.classList.toggle('hidden', !v);
+    try { localStorage.setItem('__vibepin_mini', v ? '1' : '0'); } catch { /* ignore */ }
+    renderSettings();
   }
   function setLang(l) {
     lang = l;
@@ -1023,6 +1066,7 @@
     pheadEl.querySelector('.grip').title = t('tDrag');
     statusEl.title = t('tStatus');
     atogBtn.title = t('tAnno');
+    miniBtn.title = t('tMini');
     setBtn.title = t('tSettings');
     hideBtn.title = t('tHide');
     renderSettings();
@@ -1205,7 +1249,10 @@
   window.__vibepin = {
     toggle, pending, endpoint: ENDPOINT, setLang, setTarget,
     route: () => ({ sessions: sessions.map((s) => s.sessionId), target: targetSid, pinned: targetPinned, lastClaim }),
+    // Read-only snapshot for out-of-page callers (the browser extension's toolbar
+    // popup runs in the main world and must not have to reach into the shadow DOM
+    // to learn whether capture is on).
+    state: () => ({ on, lang, theme, mini: miniOn, target: targetSid, pending: pending.length, inbox: inboxPath }),
   };
   applyI18n();   // sets all text/titles for the current language + first render
-  console.log('[vibepin] overlay ready — floating panel; ⌥A toggle · click=element, drag=region. endpoint:', ENDPOINT);
-})();
+  console.log('[vibepin] overlay ready — floating panel; ⌥A toggle · click=element, drag=region. endpoint:', ENDPOINT);})();

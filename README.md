@@ -126,7 +126,10 @@ open http://127.0.0.1:7331/           # demo page; press ⌥A, click, type, Send
   `elements` (with components) inside it. For "this whole row is cramped" feedback
   that isn't a single node.
 
-Shortcuts: **⌥A / Alt+A** toggle · **Esc** exit.
+Shortcuts: **⌥A / Alt+A** toggle · **Esc** exit. The hotkey is never the only way in — a
+mini toggle sits permanently at the bottom-right of the page (tap it, or hover to read its
+state), and with the browser extension installed the toolbar button offers the same switch
+for the tab you are on.
 
 ## The Claude Code loop
 
