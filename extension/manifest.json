@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "vibepin overlay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Injects the vibepin overlay into your local dev pages — pin any UI element, your AI coding agent edits the source.",
   "permissions": ["storage", "scripting"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
@@ -15,8 +15,8 @@
     }
   ],
   "action": {
-    "default_title": "vibepin — overlay settings",
-    "default_popup": "options.html"
+    "default_title": "vibepin — 标注开关",
+    "default_popup": "mini.html"
   },
   "options_page": "options.html"
 }

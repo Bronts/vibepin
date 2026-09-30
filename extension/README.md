@@ -75,8 +75,10 @@ or on one line:
 typeof window.__vibepin      // "object"
 ```
 
-Press **Alt+A** (⌥A) and the panel appears. The daemon row under the panel title shows the
-real destination — `→ <inbox path>` — refreshed from `/health` every 10s.
+Press **Alt+A** (⌥A) and the panel appears, or click the persistent mini button at the
+bottom-right of the page — it is always there, so the hotkey is never the only way in. The
+daemon row under the panel title shows the real destination — `→ <inbox path>` — refreshed
+from `/health` every 10s.
 
 If the console instead shows:
 
@@ -88,9 +90,30 @@ If the console instead shows:
 daemon and reload. Confirm which port it took from its startup banner or
 `curl http://127.0.0.1:7331/health`.
 
+## Toolbar button
+
+Click the toolbar icon and a **mini popup** opens: one big toggle that turns annotate mode on
+and off for the tab you are on, the daemon endpoint and inbox, and what the popup can or
+cannot do right now.
+
+It talks to the overlay through `chrome.scripting.executeScript({ world: 'MAIN' })`, because
+the overlay is a `<script src>` the page loaded — it lives in the page's **main world**, which
+the popup's isolated world cannot read. Reading prefers the overlay's own `state()` and only
+falls back to sniffing the shadow DOM, so a page served by an older daemon still shows a
+truthful button instead of a dead one.
+
+| Popup state | What it says |
+|---|---|
+| green dot, **开启标注** / **关闭标注** | Daemon found and the page has the overlay. Click to toggle. |
+| green dot, **此页未注入** | The daemon is up but this page never loaded the overlay. **重新注入** adds the tag now (settings changes still need a reload). |
+| red dot, **此页未注入** | No daemon on 7331-7370. Start one with `npx vibepin daemon`. |
+
+Toggling while the overlay is *not* loaded is impossible by definition, so the button is
+disabled there rather than silently failing.
+
 ## Settings
 
-Toolbar icon → popup, or **Details → Extension options** (both open `options.html`):
+**完整设置** in the popup, or **Details → Extension options** (both open `options.html`):
 
 | Setting | Meaning |
 |---|---|
@@ -119,6 +142,7 @@ every navigation. The extension has neither problem.
 | File | |
 |---|---|
 | `manifest.json` | MV3 manifest: content script on local pages, toolbar popup + options page, minimal permissions. |
-| `discover.js` | Shared daemon discovery (`/health` probe over 7331-7370). Loaded by the content script and the settings page. |
+| `discover.js` | Shared daemon discovery (`/health` probe over 7331-7370). Loaded by the content script, the settings page and the toolbar popup. |
 | `inject.js` | Content script: decide, probe, inject the `<script>`, report. |
+| `mini.html` / `mini.js` | Toolbar popup: the annotate on/off toggle for the active tab, daemon status, links to re-inject and to the settings page. |
 | `options.html` / `options.js` | Settings UI: daemon status, port pin, local-only scope. |

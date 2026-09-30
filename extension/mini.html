@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>vibepin</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 12px; width: 264px;
+    font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    background: #161616; color: #e8e8e8;
+  }
+  header { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
+  header b { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+  header b span { color: #f5c518; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #6f6f6f; flex: 0 0 auto; }
+  .dot.ok { background: #36d399; }
+  .dot.bad { background: #e0a056; }
+
+  /* The one thing this popup is for. Big, unmissable, and it states the action
+     it will perform rather than the state you are in. */
+  #toggle {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; height: 44px; border: 0; border-radius: 10px; cursor: pointer;
+    background: #262626; color: #e8e8e8; font: 600 14px inherit;
+  }
+  #toggle:hover:not(:disabled) { background: #303030; }
+  #toggle.on { background: #f5c518; color: #1a1a1a; }
+  #toggle:disabled { opacity: .45; cursor: not-allowed; }
+  #toggle svg { display: block; }
+
+  .why { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; color: #9a9a9a; }
+  .why.bad { color: #e0a056; }
+
+  dl { margin: 12px 0 0; display: grid; grid-template-columns: 46px 1fr; gap: 4px 8px; }
+  dt { color: #6f6f6f; font-size: 11.5px; }
+  dd {
+    margin: 0; font: 11.5px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    color: #cfcfcf; word-break: break-all;
+  }
+  footer { display: flex; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #2c2c2c; }
+  footer button {
+    flex: 1 1 0; padding: 6px 0; border-radius: 7px; border: 1px solid #3a3a3a;
+    background: #212121; color: #cfcfcf; font: 12px inherit; cursor: pointer;
+  }
+  footer button:hover { background: #2a2a2a; border-color: #4a4a4a; color: #e8e8e8; }
+</style>
+</head>
+<body>
+  <header><span class="dot" id="dot"></span><b>vibepin<span>.</span></b></header>
+
+  <button id="toggle" disabled>
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+    <span id="toggleLabel">…</span>
+  </button>
+  <p class="why" id="why"></p>
+
+  <dl>
+    <dt>daemon</dt><dd id="endpoint">—</dd>
+    <dt>inbox</dt><dd id="inbox">—</dd>
+    <dt>本页</dt><dd id="page">—</dd>
+  </dl>
+
+  <footer>
+    <button id="reload" type="button">重新注入</button>
+    <button id="settings" type="button">完整设置</button>
+  </footer>
+
+  <script src="discover.js"></script>
+  <script src="mini.js"></script>
+</body>
+</html>
