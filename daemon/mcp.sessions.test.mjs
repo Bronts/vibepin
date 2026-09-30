@@ -100,7 +100,11 @@ test('resolve is append-only and reports a line count, not a byte count', async 
   const receipt = await tools.resolve({ ids: ['fat'], sessionId: 'mcp-aaa111' });
   // §7.4: the old receipt was store.size() — bytes. Here A's queue still holds the
   // unclaimed a1 and the shared inbox holds bc1 ⇒ 2 annotations, whatever they weigh.
-  assert.deepEqual(receipt, { resolved: 1, pending: 2 });
+  // Field-wise, not a whole-object deepEqual: the receipt legitimately grows (it now
+  // also reports how the ledger half went), and an exact-shape assert would make
+  // every additive change look like a regression.
+  assert.equal(receipt.resolved, 1, 'the receipt counts lines, not bytes');
+  assert.equal(receipt.pending, 2);
 
   // Append-only (§7.3): the claimed line is still in the queue, only claims.jsonl
   // grew — a read-modify-write window is what used to erase concurrent POSTs.
@@ -109,8 +113,12 @@ test('resolve is append-only and reports a line count, not a byte count', async 
   assert.match(claims, /"sessionId":"mcp-aaa111"/, 'the claim is accounted for against the session');
 
   // Idempotent, and it can only resolve ids that are in its own read set.
-  assert.deepEqual(await tools.resolve({ ids: ['fat'], sessionId: 'mcp-aaa111' }), { resolved: 0, pending: 2 });
-  assert.deepEqual(await tools.resolve({ ids: ['a1'], sessionId: 'mcp-bbb222' }), { resolved: 0, pending: 2 });
+  const repeat = await tools.resolve({ ids: ['fat'], sessionId: 'mcp-aaa111' });
+  assert.equal(repeat.resolved, 0);
+  const foreign = await tools.resolve({ ids: ['a1'], sessionId: 'mcp-bbb222' });
+  assert.equal(foreign.resolved, 0);
+  assert.equal(foreign.settled, 0, 'B must not settle anything for an id it cannot see');
+  assert.equal(foreign.missing, 1, 'nothing is silenced: the id is accounted for in the receipt');
   assert.deepEqual((await tools.list({ sessionId: 'mcp-aaa111' })).map((i) => i.id), ['a1', 'bc1']);
 });
 

@@ -563,12 +563,32 @@ function fail(code, message) {
   return e;
 }
 
+// Ledger writes are a read-modify-write over a whole file. `writeJsonAtomic` makes
+// one write atomic, but not the read before it: two settles of the same batch can
+// both read `open`, both write, and the second silently discards the first — with
+// both callers reporting success. Serialising per ledger inside this process removes
+// that. It does NOT cover another process (`claim.js`, a separate `vibepin ack`),
+// which is a known gap.
+const ackQueues = new Map();
+function serialized(key, run) {
+  const prev = ackQueues.get(key) ?? Promise.resolve();
+  const next = prev.then(run, run);          // run either way: one caller's failure must not block the next
+  const tail = next.then(() => {}, () => {});
+  ackQueues.set(key, tail);
+  tail.then(() => { if (ackQueues.get(key) === tail) ackQueues.delete(key); });
+  return next;
+}
+
 // The only writer of item statuses. `seqs` is 1-based and matches the number the
 // delivery header printed; null/undefined means "every open item" (--all-done).
 // Rows already in the target status are left untouched and not counted, so a
 // repeated ack is a no-op instead of a second history entry.
-export async function ackItems(inbox, id, { seqs = null, status = 'done', note = null, reason = null, now = Date.now() } = {}) {
+export function ackItems(inbox, id, opts = {}) {
   assertBatchId(id);
+  return serialized(batchPath(inbox, id), () => ackItemsUnlocked(inbox, id, opts));
+}
+
+async function ackItemsUnlocked(inbox, id, { seqs = null, status = 'done', note = null, reason = null, now = Date.now() } = {}) {
   const batch = await readBatch(inbox, id);
   if (!batch) throw fail('unknown-batch', `unknown batch: ${id}`);
   if (!STATUSES.includes(status)) throw fail('bad-status', `--status must be one of ${STATUSES.join(' / ')} (got ${JSON.stringify(status)})`);
@@ -614,6 +634,64 @@ export async function ackItems(inbox, id, { seqs = null, status = 'done', note =
   if (counts.open === 0 && batch.closedAt == null && updated > 0) batch.closedAt = now;
   if (updated > 0) await writeBatch(inbox, batch);
   return { batch, updated, remaining: counts.open, closedAt: batch.closedAt };
+}
+
+// --- resolve by annotation id (the MCP `resolve_annotation` path) ---------------
+
+// `ackItems` speaks in batch seqs; an MCP client only has annotation ids — it may
+// never have seen a delivery header at all. Map one to the other, newest batch
+// first.
+//
+// Two filters, both load-bearing:
+//
+//   `owner`  — only the session that claimed a batch may answer it. Scoping by the
+//              ledger's own `sessionId` (not by "is it still pending in my read
+//              set") is what makes this work on the normal path: by the time an
+//              agent resolves, `claim.js` has already drained the queue, so the id
+//              is no longer "visible" — but the batch still records whose it is.
+//
+//   `open`   — an item already ruled on (`wontfix` "by design, not a bug",
+//              `deferred`, `blocked`, or someone else's `done`) carries a
+//              judgement. A resolution that silently replaced it with its own note
+//              would destroy the one thing the ledger exists to preserve.
+//
+// Everything is bucketed and reported, never silently dropped: an id that is not
+// the caller's, already ruled on, or absent from every ledger is counted, so a
+// partial result can never read as a complete one.
+export async function ackByIds(inbox, ids, { note = null, status = 'done', now = Date.now(), onWarn = null, owner = null } = {}) {
+  const want = new Set(ids);
+  const seen = new Map();                    // annotation id -> { state, batchId?, seq? }
+  for (const batch of await listBatches(inbox, { onWarn })) {
+    const mine = (batch.sessionId ?? null) === owner;
+    for (const item of batch.items ?? []) {
+      if (!want.has(item.id) || seen.has(item.id)) continue;
+      seen.set(item.id, !mine ? { state: 'foreign' }
+        : item.status === 'open' ? { state: 'open', batchId: batch.id, seq: item.seq }
+          : { state: 'ruled' });
+    }
+    if (seen.size === want.size) break;
+  }
+
+  const seqsByBatch = new Map();
+  for (const loc of seen.values()) {
+    if (loc.state !== 'open') continue;
+    if (!seqsByBatch.has(loc.batchId)) seqsByBatch.set(loc.batchId, []);
+    seqsByBatch.get(loc.batchId).push(loc.seq);
+  }
+
+  let updated = 0;
+  for (const [batchId, seqs] of seqsByBatch) {
+    const r = await ackItems(inbox, batchId, { seqs, status, note, now });
+    updated += r.updated;
+  }
+  const count = (state) => [...seen.values()].filter((l) => l.state === state).length;
+  return {
+    settled: updated,
+    skipped: count('ruled'),
+    foreign: count('foreign'),
+    missing: want.size - seen.size,
+    batches: [...seqsByBatch.keys()],
+  };
 }
 
 // --- rebuild ---------------------------------------------------------------------

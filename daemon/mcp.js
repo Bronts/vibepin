@@ -2,14 +2,15 @@
 // Exposes three tools over Streamable HTTP at /mcp:
 //   - list_annotations    : current pending annotations (no drain)
 //   - watch_annotations   : long-poll; blocks until new annotations arrive (the watch-mode loop)
-//   - resolve_annotation  : mark annotation(s) done and archive the claim
+//   - resolve_annotation  : settle the batch ledger + archive the claim
 //
 // Mirrors vibe-annotations' watch_annotations loop, but the overlay it feeds is
 // universal (web + Electron + pixel capture), not a Chrome extension.
 //
 // Session routing (§8.2). Each tool takes an optional `sessionId`:
 //   with sessionId    -> read that session's queue *and* the shared inbox; a
-//                        resolve only appends to claims.jsonl (no queue rewrite)
+//                        resolve settles the ledger, then appends to claims.jsonl
+//                        (no queue rewrite)
 //   without sessionId -> shared inbox only, byte-for-byte today's behaviour
 //
 // The routing key can only come from a *tool argument*. The transport-level
@@ -18,6 +19,7 @@
 // stop resolving, so it is never treated as a session identity (design §13 ④).
 
 import { randomUUID } from 'node:crypto';
+import { ackByIds } from './batches.js';
 
 // The SDK is imported lazily, for two reasons: the daemon still runs in plain
 // file mode with no node_modules, and the routing surface below stays testable
@@ -97,9 +99,22 @@ export function createToolBindings(store, sessions) {
       }
     },
 
-    async resolve({ ids, sessionId } = {}) {
+    async resolve({ ids, sessionId, note } = {}) {
       const sid = requireValid(sessionId);
       if (sid) await touch(sid);
+      // Settle the ledger. `vibepin report` reads the ledger's item status, so
+      // without this an MCP-resolved note stays `open` for ever and its report
+      // never reaches exit 0 — the comparison table the user checks against lies.
+      // `note` is required for that transition (it becomes the 证据 column);
+      // `ackItems` enforces it, and throws before anything is written.
+      //
+      // `owner` is the routing key for the ledger half: only the session that
+      // claimed a batch may answer it. It cannot be scoped by "is it still pending
+      // in my read set" — by the time an agent resolves, `claim.js` has already
+      // drained the queue, so the id is no longer visible while the batch still
+      // records whose it is.
+      const warnings = [];
+      const settled = await ackByIds(store.INBOX, ids, { note, owner: sid ?? null, onWarn: (w) => warnings.push(w) });
       // Append-only (§7.3): resolveByIds adds one claims.jsonl line
       // ({ids, sessionId, at}) and never rewrites a queue, so a concurrent POST
       // cannot be erased by a read-modify-write window.
@@ -107,10 +122,22 @@ export function createToolBindings(store, sessions) {
       // The receipt reports a *count*: the old code reported store.size(), i.e.
       // bytes, as if they were annotations (§7.4). "Pending" here means what is
       // still waiting for this caller — its read set, queues and inbox alike.
+      // Bucketed so a partial result can never read as complete: `settled` changed,
+      // `skipped` was already ruled on (left alone on purpose), `foreign` belongs to
+      // another session, `missing` has no ledger item at all (an MCP-only session
+      // claims no batch). Together they cover every id asked about.
       const pending = sid
         ? (await store.count(store.queuePath(sid))) + (await store.count(store.INBOX))
         : await store.count(store.INBOX);
-      return { resolved, pending };
+      return {
+        resolved,
+        pending,
+        settled: settled.settled,
+        skipped: settled.skipped,
+        foreign: settled.foreign,
+        missing: settled.missing,
+        ...(warnings.length ? { warnings } : {}),
+      };
     },
   };
 }
@@ -149,8 +176,8 @@ async function buildServer(store, sessions) {
 
   server.tool(
     'resolve_annotation',
-    'Mark annotation(s) as done and record the claim. Pass the ids you have implemented.',
-    { ids: z.array(z.string()).min(1), sessionId },
+    'Mark annotation(s) as done: settles them in the batch ledger (which `vibepin report` reads) and records the claim so they are not delivered again. `note` is required for any id that belongs to a batch — it becomes the 证据 column the user checks against.',
+    { ids: z.array(z.string()).min(1), sessionId, note: z.string().optional() },
     text((args) => tools.resolve(args))
   );
 

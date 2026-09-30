@@ -30,6 +30,11 @@ const CLI = join(REPO, 'bin', 'vibepin.js');
 const BATCHES = join(REPO, 'daemon', 'batches.js');
 const B = await import(pathToFileURL(BATCHES).href);
 
+// The MCP tool surface, reached directly: mcp.js imports the SDK lazily, so the
+// routing/accounting bindings are callable with no node_modules installed.
+const { createToolBindings } = await import(pathToFileURL(join(REPO, 'daemon', 'mcp.js')).href);
+const { createStore } = await import(pathToFileURL(join(REPO, 'daemon', 'store.js')).href);
+
 // The pre-ledger claim, extracted so `--json` can be compared byte for byte
 // (T5). Both files land as .js: the old script imports './store.js'.
 const OLD = mkdtempSync(join(tmpdir(), 'vibepin-old-'));
@@ -127,6 +132,15 @@ const claimArgs = (f, sid) => ['--inbox', f.inbox, '--queue', sid, '--session', 
 const cli = (f, ...args) => run(CLI, [...args, '--root', f.dir]);
 
 const ledgerOf = (f, id) => JSON.parse(readFileSync(f.ledger(id), 'utf8'));
+
+// `resolve` only reaches sessions.valid / writeLease / queuePath; the real object
+// is built in daemon.js, which opens the HTTP server as a side effect of import.
+const sessionsFake = (inbox) => ({
+  valid: (sid) => typeof sid === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(sid),
+  queuePath: (sid) => join(dirname(inbox), 'sessions', `${sid}.jsonl`),
+  writeLease: async () => ({}),
+  markInFlight: () => {},
+});
 const digestLines = (text) => text.split('\n').filter((l) => /^\d+\. /.test(l));
 const tableRows = (text) => text.split('\n').filter((l) => /^\|\s*!?\d+\s*\|/.test(l));
 const batchIdOf = (text) => /^\[vibepin\] 批 (b-\d{8}-\d{6}-[0-9a-f]{4}) ·/.exec(text)?.[1] ?? null;
@@ -739,4 +753,148 @@ test('T18 an unreadable ledger is skipped (fail-open), never a delivery failure'
   const b = batchIdOf(out.out);
   assert.notEqual(b, a);
   assert.equal(f.ledgers().length, 2);
+});
+
+
+// ---------------------------------------------------------------------------
+// T19 — resolve_annotation settles the *ledger*, not just claims.jsonl
+
+// The defect this guards: resolve_annotation wrote a claims.jsonl line (so the
+// note stopped being re-delivered) but never touched the ledger. report reads the
+// ledger's item status, so the note stayed `open` for ever and report never
+// reached exit 0 — the comparison table the user checks against lied.
+
+test('T19 resolve_annotation settles the ledger, so report can go green', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'), record('a2'));
+  const out = await run(CLAIM, claimArgs(f, 's1'));
+  assert.equal(out.code, 0, out.err);
+  const id = batchIdOf(out.out);
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['open', 'open']);
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  const r = await tools.resolve({ ids: ['a1', 'a2'], sessionId: 's1', note: 'T19 已改 frontend/src/Upload.vue:12' });
+
+  assert.equal(r.settled, 2, 'both ids must be found in the ledger');
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['done', 'done']);
+  assert.ok(ledgerOf(f, id).closedAt, 'a fully answered batch is closed');
+
+  const rep = await cli(f, 'report', '--batch', id);
+  assert.equal(rep.code, 0, `report must go green: ${rep.out}`);
+  assert.equal(tableRows(rep.out).filter((l) => l.includes('!')).length, 0);
+});
+
+// The note is required by the ledger's own rule (it becomes the 证据 column), and
+// the refusal happens before anything is written — never a half-settled batch.
+test('T19b resolve_annotation without a note refuses and writes nothing', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'));
+  const out = await run(CLAIM, claimArgs(f, 's1'));
+  const id = batchIdOf(out.out);
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  await assert.rejects(() => tools.resolve({ ids: ['a1'], sessionId: 's1' }), /note/i);
+
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['open'], 'nothing may be half-settled');
+});
+
+// An MCP-only session never claims a batch, so there is no ledger item to settle.
+// Settling 0 must be a normal answer, not an error — the claims line is still
+// what stops re-delivery.
+test('T19c resolve_annotation with no ledger item is a normal zero, not an error', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'));
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  const r = await tools.resolve({ ids: ['a1'], sessionId: 's1', note: 'no batch was ever claimed' });
+
+  assert.equal(r.settled, 0);
+  assert.equal(r.resolved, 1, 'the claims line still retires it from pending');
+  assert.equal(f.claims().length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// T19d–T19f — the three hazards the happy-path test could not see
+//
+// Reviewer C ran 8 mutations against the first version of this fix: 7 slipped past
+// T19 + the whole p3 suite. These pin the ones that matter.
+
+// M1 (the worst): `seqs: null` means "every open item", so a one-id resolve that
+// widened to it would report work that was never done — the exact fake completion
+// the protocol refuses to let the CLI print (`--all-done` is deliberately unlisted).
+test('T19d resolve_annotation settles only the ids asked for, never the whole batch', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'), record('a2'), record('a3'));
+  const out = await run(CLAIM, claimArgs(f, 's1'));
+  const id = batchIdOf(out.out);
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  const r = await tools.resolve({ ids: ['a1'], sessionId: 's1', note: '只改了 a1' });
+
+  assert.equal(r.settled, 1);
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['done', 'open', 'open']);
+  const rep = await cli(f, 'report', '--batch', id);
+  assert.equal(rep.code, 3, 'two items are still unanswered');
+  assert.equal(tableRows(rep.out).filter((l) => l.includes('!')).length, 2);
+});
+
+// M4b: the note is the whole point of the receipt — it becomes the 证据 column the
+// user checks the change against. Nothing asserted it reached the ledger.
+test('T19e the note becomes the 证据 column, verbatim — not a timestamp', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'));
+  const out = await run(CLAIM, claimArgs(f, 's1'));
+  const id = batchIdOf(out.out);
+  const note = '已改 frontend/src/Upload.vue:131';
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  await tools.resolve({ ids: ['a1'], sessionId: 's1', note });
+
+  assert.equal(ledgerOf(f, id).items[0].history.at(-1).note, note);
+  const rep = await cli(f, 'report', '--batch', id);
+  assert.ok(rep.out.includes(note), `the report must carry it as evidence:\n${rep.out}`);
+});
+
+// A verdict is not this caller's to overturn. `wontfix` exists precisely so "not a
+// bug, by design" survives someone later deciding to change it anyway.
+test('T19f resolve_annotation never overwrites an existing verdict', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'));
+  const out = await run(CLAIM, claimArgs(f, 's1'));
+  const id = batchIdOf(out.out);
+
+  const ruled = await cli(f, 'ack', '--batch', id, '--seq', '1', '--status', 'wontfix', '--reason', 'by design, not a bug');
+  assert.equal(ruled.code, 0, ruled.err);
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['wontfix']);
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  const r = await tools.resolve({ ids: ['a1'], sessionId: 's1', note: 'I changed it anyway' });
+
+  assert.equal(r.settled, 0, 'nothing may be settled');
+  assert.equal(r.skipped, 1, 'but it must be reported, not silently dropped');
+  assert.deepEqual(ledgerOf(f, id).items.map((i) => i.status), ['wontfix'], 'the verdict must stand');
+  assert.notEqual(ledgerOf(f, id).items[0].history.at(-1).note, 'I changed it anyway');
+  assert.equal((await cli(f, 'report', '--batch', id)).code, 0, 'a wontfix batch is a closed batch');
+});
+
+// Gap 2: nothing covered a resolve that spans more than one batch, so an
+// implementation that settled only the first ledger would pass the whole suite.
+test('T19g a resolve spanning two batches settles both', async () => {
+  const f = project();
+  seed(f.queue('s1'), record('a1'));
+  const o1 = await run(CLAIM, claimArgs(f, 's1'));
+  const id1 = batchIdOf(o1.out);
+  seed(f.queue('s1'), record('a2'));
+  const o2 = await run(CLAIM, claimArgs(f, 's1'));
+  const id2 = batchIdOf(o2.out);
+  assert.notEqual(id1, id2, 'the fixture needs two distinct batches');
+
+  const tools = createToolBindings(createStore(f.inbox), sessionsFake(f.inbox));
+  const r = await tools.resolve({ ids: ['a1', 'a2'], sessionId: 's1', note: '两批都改了' });
+
+  assert.equal(r.settled, 2);
+  assert.deepEqual(ledgerOf(f, id1).items.map((i) => i.status), ['done']);
+  assert.deepEqual(ledgerOf(f, id2).items.map((i) => i.status), ['done']);
+  assert.equal((await cli(f, 'report', '--batch', id1)).code, 0);
+  assert.equal((await cli(f, 'report', '--batch', id2)).code, 0);
 });
