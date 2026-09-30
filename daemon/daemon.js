@@ -12,8 +12,8 @@
 // so every annotation can say which project it came from and where it landed.
 
 import http from 'node:http';
-import { readFile, appendFile, mkdir } from 'node:fs/promises';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { readFile, appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
@@ -115,6 +115,7 @@ const PROJECT_ROOT = resolve(arg('--root') || process.env.ANNOTATE_ROOT || CONFI
 // (delegated to resolveInbox) still win, config.json sits between them and the
 // built-in ./.vibepin/inbox.jsonl — so it can fill that gap, never override it.
 const INBOX = (arg('--inbox') || process.env.ANNOTATE_INBOX) ? resolveInbox() : (CONFIG.inbox || resolveInbox());
+const PIDFILE = join(dirname(INBOX), 'daemon.json');
 const store = createStore(INBOX);
 const OVERLAY = join(__dirname, '..', 'core', 'annotate.js');
 
@@ -566,11 +567,20 @@ if (isEntryPoint()) {
 
   server.listen(PORT, HOST, async () => {
     if (!existsSync(dirname(INBOX))) await mkdir(dirname(INBOX), { recursive: true }).catch(() => {});
+    // A pidfile is what lets `vibepin down` (and a human) stop *this* daemon rather
+    // than guess a PID. /health deliberately never exposes one, so without this the
+    // only way out of a detached daemon is the task manager.
+    await mkdir(dirname(INBOX), { recursive: true }).catch(() => {});
+    await writeFile(PIDFILE, `${JSON.stringify({ pid: process.pid, port: PORT, inbox: INBOX, startedAt: Date.now() })}\n`, 'utf8').catch(() => {});
+    const dropPidfile = () => { try { rmSync(PIDFILE, { force: true }); } catch { /* best effort */ } };
+    process.on('exit', dropPidfile);
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { dropPidfile(); process.exit(0); });
     sessions.start();   // §4.4: 1s readdir+stat poll, started with the server
     console.log(`[vibepin] daemon  http://${HOST}:${PORT}`);
     console.log(`[vibepin] overlay http://${HOST}:${PORT}/annotate.js`);
     console.log(`[vibepin] inbox   ${INBOX}`);
     console.log(`[vibepin] root    ${PROJECT_ROOT}`);
+    console.log(`[vibepin] pid     ${process.pid}  (stop with: vibepin down)`);
     console.log(`[vibepin] sessions ${SESSIONS} (read-only for the browser: GET /sessions)`);
     if (existsSync(CONFIG_PATH)) console.log(`[vibepin] config  ${CONFIG_PATH}`);
     console.log(mcpHandler

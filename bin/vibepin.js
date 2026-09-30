@@ -28,13 +28,15 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createStore, isValidSid, lastSeenSeconds, pathsFor, pidAlive, readLeases } from '../daemon/store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, '..');
 const HOME = homedir();
+const HOST_LABEL = '127.0.0.1';                 // daemon.js binds 127.0.0.1 only
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [cmd, ...rest] = process.argv.slice(2);
 
 // A value-less option must fail loudly rather than silently fall back: these
@@ -836,6 +838,135 @@ if (cmd === 'show') {
   }
 }
 
+// --- up / down: the daemon's lifecycle ------------------------------------------
+// `daemon` starts it in the foreground (right for a dev server that owns the
+// process). `up` answers a different need: the daemon is shared infrastructure
+// that must outlive whichever terminal happened to start it — and a harness that
+// reclaims its background jobs is exactly what killed it before. So `up` reuses an
+// existing daemon when there is one and otherwise spawns a DETACHED one, which is
+// the only form that survives.
+//
+// A project's own start script may call `vibepin up`; the logic must live here so
+// there is one implementation, not one per project.
+
+const DAEMON_MAIN = join(__dirname, '..', 'daemon', 'daemon.js');
+
+// The daemon serving a given inbox — not merely "a vibepin daemon somewhere".
+// `doctor` deliberately takes the first daemon it finds; `up` must not, or it would
+// report another project's daemon as ours.
+async function daemonFor(inbox, { configuredPort = 0 } = {}) {
+  const ports = configuredPort > 0 ? [configuredPort] : Array.from({ length: 40 }, (_, n) => 7331 + n);
+  const hits = (await Promise.all(ports.map(probeDaemon))).filter(Boolean);
+  const mine = hits.filter((h) => typeof h.info.inbox === 'string' && resolve(h.info.inbox) === resolve(inbox));
+  return { mine: mine.sort((a, b) => a.port - b.port)[0] ?? null, others: hits.length - mine.length };
+}
+
+function readConfiguredPort(root) {
+  const configPath = join(root, '.vibepin', 'config.json');
+  if (!existsSync(configPath)) return 0;
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    return Number.isInteger(raw.port) ? raw.port : 0;
+  } catch {
+    return 0;                 // doctor reports a malformed config; `up` just ignores it
+  }
+}
+
+async function cmdUp(root, inbox) {
+  const configuredPort = readConfiguredPort(root);
+  const before = await daemonFor(inbox, { configuredPort });
+  if (before.mine) {
+    console.log(`[vibepin] already up on ${HOST_LABEL}:${before.mine.port} for this inbox — reusing it`);
+    console.log(`[vibepin] inbox ${inbox}`);
+    return 0;
+  }
+
+  const logPath = join(dirname(inbox), 'daemon.log');
+  let out;
+  try {
+    out = openSync(logPath, 'a');
+  } catch (e) {
+    console.error(`vibepin up: cannot open ${logPath}: ${e.message}`);
+    return 1;
+  }
+  // detached + unref: the child must not be killed when this CLI (or the harness
+  // job that ran it) exits. stdio ignores stdin and appends to the log, so a
+  // detached daemon still leaves a diagnosable trail.
+  const child = spawn(process.execPath, [DAEMON_MAIN, '--inbox', inbox, '--root', root], {
+    cwd: root, detached: true, stdio: ['ignore', out, out],
+  });
+  child.unref();
+
+  // Wait for /health rather than trusting the spawn: the daemon still has to bind a
+  // port and open the store, and a failure after fork would otherwise be reported
+  // as success.
+  const deadline = Date.now() + 15000;
+  let found = null;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    found = (await daemonFor(inbox, { configuredPort })).mine;
+    if (found) break;
+    if (child.exitCode !== null) break;      // died before binding
+  }
+  if (!found) {
+    console.error(`vibepin up: the daemon did not come up within 15s — see ${pretty(logPath)}`);
+    return 1;
+  }
+  console.log(`[vibepin] up on ${HOST_LABEL}:${found.port}  (pid ${child.pid})`);
+  console.log(`[vibepin] inbox ${inbox}`);
+  console.log(`[vibepin] log   ${pretty(logPath)}`);
+  console.log('[vibepin] stop  vibepin down');
+  return 0;
+}
+
+async function cmdDown(root, inbox) {
+  const pidPath = join(dirname(inbox), 'daemon.json');
+  const configuredPort = readConfiguredPort(root);
+  const found = (await daemonFor(inbox, { configuredPort })).mine;
+
+  let rec = null;
+  try {
+    rec = JSON.parse(readFileSync(pidPath, 'utf8'));
+  } catch { /* no pidfile: below */ }
+
+  if (rec && Number.isInteger(rec.pid) && pidAlive(rec.pid)) {
+    try {
+      process.kill(rec.pid);
+    } catch (e) {
+      console.error(`vibepin down: cannot stop pid ${rec.pid}: ${e.message}`);
+      return 1;
+    }
+    for (let i = 0; i < 40 && pidAlive(rec.pid); i++) await sleep(100);
+    if (pidAlive(rec.pid)) {
+      console.error(`vibepin down: pid ${rec.pid} is still alive after 4s`);
+      return 1;
+    }
+    console.log(`[vibepin] stopped pid ${rec.pid}${found ? ` (${HOST_LABEL}:${found.port})` : ''}`);
+    if (existsSync(pidPath)) rmSync(pidPath, { force: true });
+    return 0;
+  }
+
+  // A daemon started by hand (`node daemon/daemon.js`, or a foreign start script)
+  // has no pidfile, and /health deliberately never exposes a PID — so the honest
+  // answer is "this one was not started by `vibepin up`", not a guessed kill.
+  if (found) {
+    console.error(`vibepin down: a daemon is serving ${pretty(inbox)} on port ${found.port}, but there is no pidfile at ${pretty(pidPath)}.`);
+    console.error('  It was not started by `vibepin up`, so this command will not guess a PID. Stop it where it was started,');
+    console.error('  or restart it as `vibepin up` so it becomes manageable.');
+    return 1;
+  }
+  console.log('[vibepin] no daemon for this inbox — nothing to stop');
+  if (existsSync(pidPath)) rmSync(pidPath, { force: true });
+  return 0;
+}
+
+if (cmd === 'up' || cmd === 'down') {
+  // `--root` then cwd, same order as every other command that needs a project.
+  const root = resolve(opt('--root') || process.cwd());
+  const inbox = opt('--inbox') ? resolve(opt('--inbox')) : join(root, '.vibepin', 'inbox.jsonl');
+  process.exit(cmd === 'up' ? await cmdUp(root, inbox) : await cmdDown(root, inbox));
+}
+
 const TARGETS = {
   daemon: 'daemon/daemon.js',
   watch: 'daemon/watch.js',
@@ -849,7 +980,9 @@ if (!cmd || ['help', '-h', '--help'].includes(cmd) || !TARGETS[cmd]) {
 
 Commands:
   init      wire the /vpin loop into an agent (--agent claude|codex|cursor|antigravity|omp|all)
-  daemon    start the daemon (serves overlay, collects annotations, exposes /mcp)
+  up        start the daemon detached (reuse if one already serves this inbox) — survives a terminal or job going away
+  down      stop the daemon started by "up" (reads .vibepin/daemon.json; never guesses a PID)
+  daemon    start the daemon in the foreground (serves overlay, collects annotations, exposes /mcp)
   watch     block until there is work to claim, then exit (wake primitive)
   claim     drain pending annotations, open a batch ledger and print the instruction-layer delivery header
   ack       settle delivered annotations (done/wontfix/blocked/deferred) — the ledger's only writer
